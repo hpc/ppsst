@@ -1,0 +1,174 @@
+#!/bin/bash
+# vi:set sw=2:
+
+[ -f /etc/sysconfig/ppsst ] && . /etc/sysconfig/ppsst
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:$PPSST_BIN
+
+if [ -z "$ROOT" ]; then
+  echo This script must have variables and functions defined as in the PPSST build script.
+else
+
+  function packages_clean_up {
+    if [ -n "$RUNNING" ] && [ -n "$ROOT" ]; then
+      if [ $RUNNING -ne 0 ] && [ "$ROOT" != "/" ]; then
+
+	[ -n "$VERBOSE" ] && echo "ppsst[$IMG]: searching $ROOT for co-dependent processes"
+	STRERR=$(lsof -c ^lsof +D "$ROOT")
+	if [ -n "$STRERR" ]; then
+	  [ -n "$VERBOSE" ] && echo "$STRERR"
+	  lsof -t -c ^lsof +D "$ROOT" | while read pid; do
+	    kill -TERM "$pid"
+	  done
+	fi
+
+	[ -n "$VERBOSE" ] && echo "ppsst[$IMG]: unmounting $ROOT/proc"
+        umount $ROOT/proc
+
+      fi
+    fi
+    exit
+  }
+
+  trap packages_clean_up SIGHUP SIGINT SIGTERM
+
+  # this perl scriptlet takes several files and creates a 
+  # space-separated list, 
+  # - ignoring comments and empty lines
+  # - ignoring comments after list entries
+  # - protecting whitespace in list entries
+  rpmlist(){
+     perl -ne 'next if /^(#|\s*$)/; chomp; s/\s*#.*$//; s/\s+/\\ /g; $list.="$_ "; END{ chop $list; print $list }' $1 $2 $3 $4 $5 $6 $7 $8 $9
+  }
+
+  # this perl scriptlet takes several files and creates a 
+  # comma-separated list, 
+  # - ignoring comments and empty lines
+  # - ignoring comments after list entries
+  # - protecting whitespace in list entries
+  rpmlist_csv(){
+     perl -ne 'next if /^(#|\s*$)/; chomp; s/\s*#.*$//; s/\s+/\\ /g; $list.="$_,"; END{ chop $list; print $list }' $1 $2 $3 $4 $5 $6 $7 $8 $9
+  }
+
+  # this perl scriptlet takes several files and creates a 
+  # space-separated list, 
+  # - ignoring comments and empty lines
+  # - ignoring comments after list entries
+  # - protecting whitespace in list entries
+  rpmlist_escglob(){
+     perl -ne 'next if /^(#|\s*$)/; chomp; s/\s*#.*$//; s/\s+/\\ /g; s/(\*|\?)/\\$1/g; $list.="$_ "; END{ chop $list; print $list }' $1 $2 $3 $4 $5 $6 $7 $8 $9
+  }
+
+  # removepackages and excludepackages are lists of packages, one per line
+  # removepackages are actively removed and excluded
+  # excludepackages are only excluded, not removed
+
+  # EXPKGS is a comma separated list with normal globbing
+  # comments are ignored
+  # e.g. EXPKGS=foo*,blah; yum -x $EXPKGS install <package>
+  if [ -z "$EXPKG" -a -z "$RMPKG" ]; then
+      EXPKGS=""
+      EX=""
+  else
+      EXPKGS=$(rpmlist_csv $EXPKG $RMPKG)
+      if [ -z "$EXPKGS" ]; then
+	EX=""
+      else
+	EX="-x $EXPKGS"
+      fi
+  fi
+
+  # RMPKGS is a space separated list with escaped globbing
+  # comments are ignored
+  # e.g. RMPKGS="foo\* blah"; yum remove $RMPKGS
+  RMPKGS=$(rpmlist_escglob $RMPKG)
+
+  # some rpm post scripts like to see /proc in the installroot
+  # don't mess with proc if this is a running system
+  # even though some rpms may complain about /dev not being populated, do not bind mount 
+  # with the build host ... it can wipe out /dev
+  if [ $RUNNING -ne 0 ]; then
+    [ -n "$VERBOSE" ] && echo "ppsst[$IMG]: mounting $ROOT/proc"
+    mount -o ro -t proc proc $ROOT/proc
+  fi
+
+  # finishing previous transactions ... in case something went wrong before
+  if [ -n "$VERBOSE" ]; then
+    echo "ppsst[$IMG]: yum-complete-transaction -c $YUMCFG -y --installroot $ROOT"
+    yum-complete-transaction -c $YUMCFG -y --installroot $ROOT 2>/dev/null
+  else
+    yum-complete-transaction -c $YUMCFG -y --installroot $ROOT &>/dev/null
+  fi
+
+  if test -n "$RMGRP" && test $(grep -cEv '#|^[[:space:]]*$' $RMGRP) -ne 0; then
+    # yum remove all the groups from "removegroups"
+    rpmlist $RMGRP | $XARGSCMD yum_cmd groupremove
+  fi
+
+  if test -n "$RMPKG" && test $(grep -cEv '#|^[[:space:]]*$' $RMPKG) -ne 0; then
+    # yum remove all the packages from "removepackages"
+    rpmlist $RMPKG | $XARGSCMD yum_cmd remove
+  fi
+
+  if test -n "$INGRP" && test $(grep -cEv '#|^[[:space:]]*$' $INGRP) -ne 0; then
+    # yum install all the groups from "installgroups", excluding "removepackages"
+    rpmlist $INGRP | $XARGSCMD yum_cmd $EX groupinstall
+  fi
+
+  if test -n "$INPKG" && test $(grep -cEv '#|^[[:space:]]*$' $INPKG) -ne 0; then
+    # yum install all the packages from "installpackages", excluding "removepackages"
+    # escape globbing and ignore comments
+    rpmlist_escglob $INPKG | $XARGSCMD yum_cmd $EX install
+  fi
+
+  # Check for updates
+  yum_cmd $EX update
+
+  DG=$(/bin/find $CFGDIR/downgrade -type f)
+  if [ -n "$DG" ]; then
+    yum_cmd downgrade $DG
+  fi
+
+  [ -n "$VERBOSE" ] && echo "ppsst[$IMG]: cleaning up"
+  # cleanup
+  rm -f $ROOT/core*
+
+  if [ $RUNNING -ne 0 ]; then
+
+    if [ "$ROOT" != "/" ]; then
+      find $ROOT \( -name "*.rpmorig" -o -name "*.rpmsave" -o -name "*.rpmnew" \) -print0 | xargs -0 rm 2> /dev/null
+    fi
+
+    # finishing previous transactions ... in case something went wrong before
+    if [ -n "$VERBOSE" ]; then
+      yum-complete-transaction -c $YUMCFG -y --installroot $ROOT 2>/dev/null
+    else
+      yum-complete-transaction -c $YUMCFG -y --installroot $ROOT &>/dev/null
+    fi
+
+    # yum cleanup
+    yum_cmd clean all
+    # why is yum putting stuff here?
+    rm -rf ${ROOT}${ROOT}/var/lib/yum
+    # is this last one necessary?
+    rm -rf $ROOT/var/cache/yum/*
+  fi
+
+  if [ -n "$RUNNING" ] && [ -n "$ROOT" ]; then
+    if [ $RUNNING -ne 0 ] && [ "$ROOT" != "/" ]; then
+
+      [ -n "$VERBOSE" ] && echo "ppsst[$IMG]: searching $ROOT for co-dependent processes"
+      STRERR=$(lsof -c ^lsof +D "$ROOT")
+      if [ -n "$STRERR" ]; then
+	[ -n "$VERBOSE" ] && echo "$STRERR"
+	lsof -t -c ^lsof +D "$ROOT" | while read pid; do
+	  kill -TERM "$pid"
+	done
+      fi
+
+      [ -n "$VERBOSE" ] && echo "ppsst[$IMG]: unmounting $ROOT/proc"
+      umount $ROOT/proc
+
+    fi
+  fi
+fi

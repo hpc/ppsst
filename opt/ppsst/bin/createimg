@@ -1,0 +1,166 @@
+#!/bin/bash
+# vi:set sw=2:
+
+[ -f /etc/sysconfig/ppsst ] && . /etc/sysconfig/ppsst
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:$PPSST_BIN
+
+if [ -z "$ROOT" ]; then
+  echo This script must have variables and functions defined as in the PPSST build script.
+else
+  # Just in case someone left something mounted
+  if [ "$ROOT" != "/" ]; then
+    MOUNTS=$(mount | perl -ne "m{($ROOT[/\w]+)\s} && print \"$1\n\"")
+    umount $MOUNTS &> /dev/null
+
+    MOUNTS=$(mount | perl -ne "m{($ROOT[/\w]+)\s} && print \"$1\n\"")
+    if [ -n "$MOUNTS" ]; then
+      echo "ppsst[$IMG]: ERROR:"
+      echo "ppsst[$IMG]: ERROR: Cannot create image because of $MOUNTS"
+      echo "ppsst[$IMG]: ERROR:"
+      exit 1
+    fi
+  fi
+
+  HYBRIDIZE_RESULT=1
+  if test -x /usr/bin/hybridize -a -f $CFGDIR/whitelist; then
+    # generate hybridize
+    [ -n "$VERBOSE" ] && echo "ppsst[$IMG]: ${DRYRUN_PREFIX}generating hybridize file"
+    if [ -z "$DRYRUN" ]; then
+      hybridize -f $CFGDIR/whitelist $HYBRID_OPTS -o $CFGDIR/hybridize $ROOT
+      HYBRIDIZE_RESULT=$?
+    else
+      [ -n "$VERBOSE" ] && echo "ppsst[$IMG]: ${DRYRUN_PREFIX}hybridize -f $CFGDIR/whitelist $HYBRID_OPTS -o $CFGDIR/hybridize $ROOT"
+      HYBRIDIZE_RESULT=0
+    fi
+  fi
+
+  # don't bother if no kernel is installed
+  pushd $ROOT/boot >/dev/null
+  KERNEL=$(/bin/ls -1tr vmlinuz-* | tail -1) # selects the most recently installed/modified kernel
+  popd >/dev/null
+  if [ -z "$KERNEL" ]; then
+    echo "ppsst[$IMG]: ERROR:"
+    echo "ppsst[$IMG]: ERROR: No kernel is installed in $ROOT/boot"
+    echo "ppsst[$IMG]: ERROR:"
+    exit 1
+  fi
+
+  # create image
+  if [ $HYBRIDIZE_RESULT -eq 0 ]; then
+      # create vmlinuz symlinks for Perceus
+      cd $CFGDIR
+      test -h vmlinuz || ln -s rootfs/boot/vmlinuz vmlinuz
+
+      pushd $ROOT/boot >/dev/null
+      if [ -h vmlinuz ]; then
+        KLINK=$(ls -l vmlinuz | perl -ne '/(vmlinuz-.*)$/ && print $1')
+
+        if [ "$KLINK" != "$KERNEL" ]; then
+          rm -f vmlinuz
+          ln -s $KERNEL vmlinuz
+        fi
+      else
+        ln -s $KERNEL vmlinuz
+      fi
+      popd >/dev/null
+
+      # ensure that modules.dep is up to date (panfs rpm fails to do this consistently)
+      KVERS=${KERNEL:8}
+      echo "ppsst[$IMG]: resolving broken symlinks"
+      if [ -d "$ROOT/lib/modules/$KVERS/weak-updates" ]; then
+	find "$ROOT/lib/modules/$KVERS/weak-updates" -type l -printf "%p %l\n" | \
+	  while read symlink referent; do
+	    if [ -f "$ROOT/$referent" ]; then
+	      rm -f "$symlink" && cp -fp "$ROOT/$referent" "$symlink"
+	    fi
+	  done
+      fi
+      echo "ppsst[$IMG]: depmod -a -b $ROOT $KVERS"
+      chroot_cmd depmod -a $KVERS
+
+      if [ -z "$DRYRUN" ]; then
+        # This part of the script was derived from genvnfs.sh adapted from Perceus:chroot2stateless.sh
+        # NOTE: I tried building in tmpfs, and it only shaved a second or so
+        TMPDIR=`mktemp -d /var/tmp/tmp.vnfs.XXXXXXX`
+        TIME=`date +%s`
+
+        echo "ppsst[$IMG]: creating image $RAMROOT"
+
+        if [ -f "$CFGDIR/config" ]; then
+           . $CFGDIR/config
+        fi
+
+        if [ "x$COMPRESSION" = "xhigh" ]; then
+           ZIP="9"
+        else
+           ZIP="1"
+        fi
+
+        if [ "x$HYBRIDIZE_FILE" = "x" ]; then
+           HYBRIDIZE_FILE="$CFGDIR/hybridize"
+        elif [ ! -f "$HYBRIDIZE_FILE" ]; then
+           HYBRIDIZE_FILE="$CFGDIR/hybridize"
+        fi
+
+        # The initial / must be removed, otherwise some files don't get linked!
+        HYBRIDIZE=`grep -Ev '^#|^[[:space:]]*$' $HYBRIDIZE_FILE | sed -e 's/^\///g'`
+
+        EXCLUDES="--exclude-from=$HYBRIDIZE_FILE"
+        if [ ! -d "$CFGDIR" ]; then
+           echo "CFGDIR '$CFGDIR' doesn't seem to exist!"
+           exit 1
+        fi
+
+        cd $ROOT
+        mkdir -p $TMPDIR
+        # NOTE: I tried using an --include-from approach, but that was nontrivial
+        # and it didn't seem to save much time
+        rsync -qaRSH $EXCLUDES . $TMPDIR
+
+        if [ -f "$TMPDIR/sbin/hotplug" ]; then
+           mv $TMPDIR/sbin/hotplug $TMPDIR/sbin/hotplug.disabled
+        fi
+
+        for i in $HYBRIDIZE; do
+           for file in `(cd $ROOT; find $i -maxdepth 0 ) 2>/dev/null`; do
+              ln -s $ROOT/$file $TMPDIR/$file
+           done
+           # FIXME: it seems like this could be done more efficiently ... maybe this?
+           #cd $ROOT
+           #find $i -maxdepth 0 -exec ln -s $ROOT/{} $TMPDIR/{} \; 2>/dev/null
+        done
+
+        pushd $TMPDIR >/dev/null
+
+        echo -n "ppsst[$IMG]:   image size: "
+        find . | cpio -o -H newc | gzip -$ZIP > ${RAMROOT}~
+
+        if [ "x$BACKUP" = "xyes" ]; then
+           if [ -f "$RAMROOT" ]; then
+              cp $RAMROOT $RAMROOT.$TIME
+           fi
+        fi
+
+        # We do this in a single atomic move trying not to break any booting
+        # nodes
+        mv ${RAMROOT}~ $RAMROOT
+
+        popd $TMPDIR >/dev/null
+        rm -rf $TMPDIR
+      fi
+
+      if [ -z "$DRYRUN" ]; then
+        rm -f $CFGDIR/.createimg
+      fi
+  else
+      echo "ppsst[$IMG]: ERROR:"
+      echo "ppsst[$IMG]: ERROR: The hybridize script expects only one kernel when using @KVERS@"
+      echo "ppsst[$IMG]: ERROR: in the whitelist.  Therefore, the image was not actually created."
+      echo "ppsst[$IMG]: ERROR: Add unwanted kernel/module packages to the removepackages list."
+      KPKGS=$(chroot_cmd find /lib/modules -mindepth 1 -maxdepth 1)
+      for i in $KPKGS; do echo -n "ppsst[$IMG]: ERROR: $i claimed by "; rpm --root $ROOT -qf $i; done
+      echo "ppsst[$IMG]: ERROR:"
+      exit 1
+  fi
+fi

@@ -1,0 +1,25 @@
+#
+# $Header: /root/rpmbuild/SOURCES/ppsst-0.3/opt/ppsst/etc/RCS/onservices,v 1.2 2011/10/19 16:27:08 shewa Exp $
+#
+# Define services to be turned on here (all others will be turned off)
+
+# Here is a reasonable minimum set of services (in case the script is run before this file is customized)
+
+atd
+autofs
+crond
+iptables
+netfs
+network
+nfs
+nfslock
+ntpd
+ntpdate
+portreserve
+postfix
+rpcbind
+sshd
+sysfs
+syslog-ng
+udev-post
+xinetd

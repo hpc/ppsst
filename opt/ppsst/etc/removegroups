@@ -1,0 +1,7 @@
+#
+# $Header: /root/rpmbuild/SOURCES/ppsst-0.2/RCS/removegroups,v 1.1 2011/10/11 19:06:28 shewa Exp $
+#
+# Define groups to be removed here
+#
+# Example:
+# Desktop

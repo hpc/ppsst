@@ -1,0 +1,154 @@
+#!/bin/bash
+#
+# $Header: /root/rpmbuild/SOURCES/ppsst-0.4/opt/ppsst/bin/RCS/sanity,v 1.4 2011/10/13 15:55:11 shewa Exp $
+#
+
+[ -f /etc/sysconfig/ppsst ] && . /etc/sysconfig/ppsst
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:$PPSST_BIN
+
+CFGDIR=$(dirname $0)
+FAST=0
+
+# if not using the cfgdir command line option (-c), then the
+# verify script must be called with full path, not relative, 
+# for the script to determine which image we are working on
+
+while getopts ":c:f:h" opt; do
+  case $opt in
+    c)
+      CFGDIR=$OPTARG
+      ;;
+    f)
+      FAST=$OPTARG
+      ;;
+    h)
+      echo "$0 [OPTION]      verify a Linux installation" >&2
+      echo >&2
+      echo "    [-c CFGDIR]  verify image in CFGDIR" >&2
+      echo >&2
+      echo "    [-f FAST]    fast verify" >&2
+      echo "                 FAST=1 use cached copy of installed files" >&2
+      echo "                 FAST=2 use cached copy of rpm verification" >&2
+      echo "                 FAST=3 use cached copy of everything" >&2
+      echo >&2
+      echo "If '-c CFGDIR' is not used, then it is assumed" >&2
+      echo "that CFGDIR=$(dirname $0)" >&2
+      exit -1
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      exit -1
+      ;;
+  esac
+done
+
+if [ "$CFGDIR" == "/" ]; then
+  IMG=$(hostname)
+  ROOT="/"
+  RPMCMD="rpm"
+  CM_DIR="/var/cfengine/distribution"
+  CM_COMMON_FILES=$CM_DIR/common
+  CM_CUSTOM_FILES=$CM_DIR/$(hostname)
+  CM_AUTOFS_FILES=$CM_DIR/classes/AutofsClient
+  CM_MODULE_FILES=$CM_DIR/classes/EnvModules
+else
+  IMG=$(basename $CFGDIR)
+  ROOT="$CFGDIR/rootfs/"
+  RPMCMD="rpm --root $ROOT"
+  VNFS="/var/lib/perceus/vnfs"
+  CM_DIR="/var/cfengine/distribution/$(hostname)$VNFS"
+  CM_COMMON_FILES=$CM_DIR/common/rootfs
+  CM_CUSTOM_FILES=$CM_DIR/$IMG/rootfs
+  CM_AUTOFS_FILES=$CM_DIR/classes/AutofsClient
+  CM_MODULE_FILES=$CM_DIR/classes/EnvModules
+fi
+
+listfiles(){
+  find $1 $2 $3 $4 $5 $6 $7 $8 $9 \
+    -mount \
+    -path "${ROOT}cgroup" -prune \
+    -o -path "${ROOT}dev" -prune \
+    -o -path "${ROOT}home" -prune \
+    -o -path "${ROOT}lost+found" -prune \
+    -o -path "${ROOT}media" -prune \
+    -o -path "${ROOT}proc" -prune \
+    -o -path "${ROOT}root" -prune \
+    -o -path "${ROOT}selinux" -prune \
+    -o -path "${ROOT}srv" -prune \
+    -o -path "${ROOT}sys" -prune \
+    -o -path "${ROOT}tmp" -prune \
+    -o -path "${ROOT}var" -prune \
+    -o -type f -print
+}
+
+PROG=$(basename $0)
+CACHE=/var/cache/ppsst
+
+ALL_FILES=$CACHE/$IMG-files.txt                         # all files installed in the host/image
+ALL_CM_FILES=$CACHE/$IMG-cm-files.txt                   # all files under configuration management (CM)
+NOT_CM_OR_RPM_FILES=$CACHE/$IMG-notcm-files.txt         # all files not under CM or RPM control
+CM_AND_RPM_FILES=$CACHE/$IMG-cm-files.txt               # all files under CM or installed by RPM
+RPM_FILES=$CACHE/$IMG-rpm-files.txt                     # all files installed by RPM
+RPMVA=$CACHE/$IMG-rpmVa.txt                             # output of rpm -Va
+RPM_VFILES=$CACHE/$IMG-rpmVa-files.txt                  # 3rd column of rpm -Va
+RPM_5FILES=$CACHE/$IMG-rpmV5-files.txt                  # files/dirs that have changed according to rpm -Va
+RPM_NOTCM_ALL=$CACHE/$IMG-changed-notcm.txt             # same as above, but only those not under CM 
+RPM_NOTCM_5FILES=$CACHE/$IMG-changed-notcm-files.txt    # same as above, but just files
+
+LOCKFILE=/var/lock/subsys/$PROG-$IMG
+
+if [ -f $LOCKFILE ] ; then
+  echo "$LOCKFILE indicates $PROG-$IMG is already running ... exiting"
+  exit
+fi
+
+touch $LOCKFILE
+
+echo Starting $PROG-$IMG
+
+mkdir -p $CACHE
+
+if [ $FAST -lt 2 ]; then
+  $RPMCMD -qla | sort > $RPM_FILES
+
+  $RPMCMD -Va > $RPMVA
+
+  perl -ne 'm{.*\s(/.*)} && print "$1\n"' $RPMVA | sort > $RPM_VFILES
+
+  # list just the files where mode or md5sum differ
+  perl -ne 'm{(.M|..5).*\s(/.*)} && print "$2\n"' $RPMVA | sort > $RPM_5FILES
+fi
+
+if [ $FAST -lt 1 ]; then
+  listfiles ${ROOT} | sort | \
+    perl -ne "s{$ROOT}{/}; print" > $ALL_FILES
+fi
+
+if [ $FAST -lt 3 ]; then
+  listfiles $CM_COMMON_FILES $CM_CUSTOM_FILES $CM_AUTOFS_FILES $CM_MODULE_FILES | \
+    perl -ne "s{$CM_COMMON_FILES}{}; s{$CM_CUSTOM_FILES}{}; s{$CM_AUTOFS_FILES}{}; s{$CM_MODULE_FILES}{}; print" | \
+    sort | uniq > $ALL_CM_FILES
+fi
+
+# find files that have been changed, but aren't under configuration management
+grep -vxF -f $ALL_CM_FILES $RPM_5FILES > $RPM_NOTCM_ALL
+rm -f $RPM_NOTCM_5FILES
+(for i in $(cat $RPM_NOTCM_ALL); do test -f $i && echo $i; done) > $RPM_NOTCM_5FILES
+
+# find all files not under configuration management
+sort $ALL_CM_FILES $RPM_FILES | uniq > $CM_AND_RPM_FILES
+grep -vxF -f $CM_AND_RPM_FILES $ALL_FILES > $NOT_CM_OR_RPM_FILES
+
+echo Report:
+echo $(wc -l $RPM_NOTCM_5FILES) files installed by RPM, but modified and not under configuration management
+cat $RPM_NOTCM_5FILES
+echo
+
+echo $(wc -l $NOT_CM_OR_RPM_FILES) files unclaimed by either RPM or configuration management
+cat $NOT_CM_OR_RPM_FILES
+echo
+
+rm -f $LOCKFILE
+
+echo Finished $PROG-$IMG

@@ -1,0 +1,15 @@
+#
+# $Header: /root/rpmbuild/SOURCES/ppsst-1.0.7/etc/sysconfig/RCS/ppsst,v 1.3 2013/10/01 15:48:45 root Exp $
+#
+
+# location of build and associated helper scripts
+PPSST_BIN=/opt/ppsst/bin
+
+# location of installpackages, removepackages, etc. for the running host
+# diskless image config files are located elsewhere
+PPSST_ETC=/opt/ppsst/etc
+
+# pexec parallelism used in hierarchical_sync script
+PARALLELISM=4
+
+HYBRID_OPTS=

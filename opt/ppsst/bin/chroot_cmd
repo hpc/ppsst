@@ -1,0 +1,20 @@
+#!/bin/bash
+
+[ -f /etc/sysconfig/ppsst ] && . /etc/sysconfig/ppsst
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:$PPSST_BIN
+
+if [ -z "$ROOT" ]; then
+  echo This script must have variables and functions defined as in the PPSST build script.
+else
+  # wrapper based on ROOT and if the command should 
+  # actually execute. This is done to get around odd yum -installroot / 
+  # behavior, as well as getting xargs yum to work in dryrun mode
+  # 
+  # it may not be necessary for chroot ...
+  if [ "$ROOT" = "/" ]; then
+    $*;
+  else # alternate root
+    chroot $ROOT $*;
+  fi
+fi

@@ -1,0 +1,22 @@
+#!/bin/bash
+
+[ -f /etc/sysconfig/ppsst ] && . /etc/sysconfig/ppsst
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:$PPSST_BIN
+
+# wrapper based on ROOT and if the command should 
+# actually execute. This is done to get around odd yum -installroot / 
+# behavior, as well as getting xargs yum to work in dryrun mode
+if [ "$ROOT" = "/" ]; then
+  if [ -n "$DRYRUN" ]; then
+    rpm --test $*;
+  else
+    rpm $*;
+  fi
+else # alternate root
+  if [ -n "$DRYRUN" ]; then
+    rpm --test --root $ROOT $*
+  else
+    rpm --root $*
+  fi
+fi

@@ -1,0 +1,10 @@
+#
+# $Header: /root/rpmbuild/SOURCES/ppsst-0.2/RCS/installpackages,v 1.1 2011/10/11 19:06:28 shewa Exp $
+#
+# Define packages to be installed here
+# globs are allowed
+#
+# Example:
+# ksh
+# make
+# panfs*

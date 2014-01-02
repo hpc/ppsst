@@ -1,0 +1,208 @@
+#!/usr/bin/perl -w
+#
+# This script is a wrapper around yum(8) with alternate execution paths
+# based on set/unset environment variables:
+#
+# CFGDIR - full pathname to your VNFS' top-level configuration directory,
+#          e.g. '/var/lib/perceus/vnfs/compute'.  This variable has no
+#          meaning when installing into the host image.   It is set by
+#          the '-c' option to $PPSST_BIN/build.
+#
+# DRYRUN - Don't install anything, just report if something would be.
+#
+# ROOT   - full pathname to your image's root directory, e.g.
+#          '$CFGDIR/rootfs' when installing into a VNFS area, or '/' when
+#          installing into the host image.
+#
+# YUMCFG - full pathname to your image's yum.conf, e.g. '$CFGDIR/yum.conf'
+#          when installing into a VNFS area, or '/etc/yum.conf' when
+#          installing into the host image.
+#
+
+END {
+   if ($createimg) {
+      exec { '/bin/touch' } '/bin/touch', "$ENV{'CFGDIR'}/.createimg"
+	 if (exists $ENV{'CFGDIR'});
+   }
+}
+
+$| = 1;
+(our $prog = $0) =~ s|.*/||;
+
+use Sys::Hostname;
+our $hostname = hostname || 'localhost.localdomain';
+
+# Assertions
+die "$prog: assertion violation: 'YUMCFG' is not defined in your environment!\n"
+   unless (exists $ENV{'YUMCFG'});
+die "$prog: assertion violation: YUMCFG=$ENV{'YUMCFG'}: Not a yum config file!\n"
+   unless (-f $ENV{'YUMCFG'});
+die "$prog: assertion violation: 'ROOT' is not defined in your environment!\n"
+   unless (exists $ENV{'ROOT'});
+die "$prog: assertion violation: ROOT=$ENV{'ROOT'}: Not an installroot directory!\n"
+   unless (-d $ENV{'ROOT'});
+
+our $createimg = 0;
+
+our @Triggers = (	# run messages that trigger a vnfs image build
+   'Erasing',
+   'Installing',
+   'Updating',
+);
+our $triggers = join ('\s*:.|', map { quotemeta() } @Triggers) . '\s*:.';
+$triggers = qr/$triggers/o;		# e.g. 'Installing : foo'
+
+our @Filters = (	# run messages for convenience
+   'Cleanup',
+   'conflicts',
+   'Error Downloading',
+   'Error:',
+   'failure',
+   'missing requires',
+   'replacing',
+   'Requires',
+);
+our $filters = join ('|', map { quotemeta() } @Filters);
+$filters = qr/$filters/o;
+
+our @Omits = (		# dryrun messages to omit
+   'already installed',
+   'Exiting',
+   'No Match',
+   'Warning',
+);
+our $omits = join ('|', map { quotemeta() } @Omits);
+$omits = qr/$omits/io;
+
+use Getopt::Long;
+
+sub Usage () {
+   print "Usage: $prog [option] [yum(8) command] [package ...]\n\n";
+   print "  The only supported option is '-x, --exclude=package'\n";
+   print "  Command may be any yum(8) command, followed by its\n";
+   print "  appropriate argument(s).\n";
+   exit 1;
+}
+
+our (
+   $opt_h,		# help
+   $opt_exclude,	# exclude packages (csv)
+);
+
+&Getopt::Long::config(
+   'bundling',		# allow option bundling
+   'require_order'	# don't mix non-options with options
+);
+
+die &Usage unless &GetOptions(
+   'h|help'		=> \$opt_h,
+   'x|exclude=s'	=> \$opt_exclude,
+);
+
+&Usage if ($opt_h);
+
+our @Cmd = ('/usr/bin/yum', '-c', $ENV{'YUMCFG'});
+
+if ($opt_exclude) {
+   push(@Cmd, '-x', $opt_exclude);
+}
+
+if ($ENV{'ROOT'} eq '/') {	# my own disk image
+   (my $img = $hostname) =~ s/\..*$//g;	# hostname -s
+   if (exists $ENV{'DRYRUN'}) {		# no-op
+      my $pid = open(YUM, "|-");
+      die "$prog: fork: $!\n" unless defined $pid;
+
+      if ($pid) {				# parent
+	 print YUM "N\n";
+	 close YUM || exit $?>>8;
+      } else {					# child
+	 my $cpid = open(CMD, "-|");
+	 die "$prog: fork: $!\n" unless defined $cpid;
+	 if ($cpid) {
+	    while (defined(my $line = <CMD>)) {
+	       print $line unless ($line =~ /$omits/);
+	    }
+	    close CMD || exit $?>>8;
+	 } else {				# grandchild
+	    open (STDERR, '>/dev/null');
+	    exec { $Cmd[0] } @Cmd, '-d1', @ARGV;
+	 }
+      }
+   } else {				# execute
+      my @YumArgs = @ARGV;
+      if (scalar(@YumArgs) > 2) {
+	 my $yumcmd = shift(@YumArgs);
+	 print STDOUT "ppsst[$img]: " . join(' ', @Cmd,"$yumcmd","\\\n[$img]");
+	 print STDOUT join(" \\\n[$img]", map { $_ = "  $_" } @YumArgs) . "\n\n";
+      } else {
+	 print STDOUT "ppsst[$img]: " . join(' ', @Cmd,@YumArgs) . "\n";
+      }
+      my $pid = open(YUM, "-|");
+      die "$prog: fork: $!\n" unless defined $pid;
+      if ($pid) {				# parent
+	 while (defined(my $line = <YUM>)) {
+	    print STDOUT $line
+	       if ($line =~ /$triggers/ || $line =~ /$filters/);
+	 }
+	 close YUM || exit $?>>8;
+      } else {					# child
+         open(STDERR, ">&STDOUT");		# dup STDOUT
+	 select STDERR; $| = 1;			# unbuffer I/O to STDERR
+	 select STDOUT; $| = 1;			# unbuffer I/O to STDOUT
+	 exec { $Cmd[0] } @Cmd, '-v', '-y', @ARGV;
+      }
+   }
+} else {			# alternate disk image
+   my $img = (exists $ENV{'IMG'} ? $ENV{'IMG'} : 'unknown');
+   if (exists $ENV{'DRYRUN'}) {		# no-op
+      my $pid = open(YUM, "|-");
+      die "$prog: fork: $!\n" unless defined $pid;
+
+      if ($pid) {				# parent
+	 print YUM "N\n";
+	 close YUM || exit $?>>8;
+      } else {					# child
+	 my $cpid = open(CMD, "-|");
+	 die "$prog: fork: $!\n" unless defined $cpid;
+	 if ($cpid) {
+	    while (defined(my $line = <CMD>)) {
+	       print $line unless ($line =~ /$omits/);
+	    }
+	    close CMD || exit $?>>8;
+	 } else {				# grandchild
+	    open (STDERR, '>/dev/null');
+	    exec { $Cmd[0] } @Cmd, '-d1', '--installroot', $ENV{'ROOT'}, @ARGV;
+	 }
+      }
+   } else {				# execute
+      my @YumArgs = @ARGV;
+      if (scalar(@YumArgs) > 2) {
+	 my $yumcmd = shift(@YumArgs);
+	 print STDOUT "ppsst[$img]: " . join(' ', @Cmd,'--installroot',"$ENV{'ROOT'}","$yumcmd","\\\n[$img]");
+	 print STDOUT join(" \\\n[$img]", map { $_ = "  $_" } @YumArgs) . "\n\n";
+      } else {
+	 print STDOUT "ppsst[$img]: " . join(' ', @Cmd,'--installroot',"$ENV{'ROOT'}",@YumArgs) . "\n";
+      }
+      my $pid = open(YUM, "-|");
+      die "$prog: fork: $!\n" unless defined $pid;
+      if ($pid) {				# parent
+	 while (defined(my $line = <YUM>)) {
+	    if ($line =~ /$triggers/) {
+	       $createimg = 1;
+	       print STDOUT $line;
+	    } elsif ($line =~ /$filters/) {
+	       print STDOUT $line;
+	    }
+	 }
+	 close YUM || exit $?>>8;
+      } else {					# child
+         open(STDERR, ">&STDOUT");		# dup STDOUT
+	 select STDERR; $| = 1;			# unbuffer I/O to STDERR
+	 select STDOUT; $| = 1;			# unbuffer I/O to STDOUT
+	 exec { $Cmd[0] } @Cmd, '-v', '-y', '--installroot', $ENV{'ROOT'}, @ARGV;
+      }
+   }
+}
+
+exit;

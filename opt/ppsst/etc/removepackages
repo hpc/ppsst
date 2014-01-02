@@ -1,0 +1,20 @@
+#
+# $Header: /root/rpmbuild/SOURCES/ppsst-0.2/RCS/removepackages,v 1.1 2011/10/11 19:06:28 shewa Exp $
+#
+### RPM package names to be REMOVED from this image ###
+# globs are allowed
+#
+############### WARNING !!!!!!! #######################
+#  These packages are removed via 'yum remove <evil rpms>'
+#  This WILL resolve and remove ALL dependencies as well.
+#  It is highly suggested that before you add an rpm to this list, 
+#  you try removing it manually on the system in INTERACTIVE mode, e.g.:
+#
+#       yum remove sendmail
+# 
+#  And see what this will do FIRST.
+#
+# Example:
+# *2.6.32-131.6*
+# prelink
+# yaci*

@@ -1,0 +1,244 @@
+#!/bin/bash
+
+#
+# This script will turn off and disable all services not listed in "onservices"
+# It will turn on and enable all services listed in "onservices"
+# Any command that changes the system can be disabled with the dryrun flag
+# Running systems in some cases require different commands to be run than images
+#
+
+[ -f /etc/sysconfig/ppsst ] && . /etc/sysconfig/ppsst
+[ -f /root/test ] && . /root/test
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:$PPSST_BIN
+
+# function definitions change for systemd and chkconfig based systems
+if [ -e "/usr/bin/systemd" ]; then
+  list_on_services(){
+    # print list of running services without .service on the end
+    # most systemctl commands can only be run on a live system
+    #  so we have to poke through the chroot filesystem to see what is turned on in images
+    if [ $RUNNING -eq 0 ]; then
+      systemctl -t service --full --no-legend | awk -F '.service' '{print $1}' | sort
+    else
+      (chroot_cmd chkconfig --list 2>&1 | grep -E "[1-5]:on[[:space:]]|[[:space:]]on[[:space:]]" | awk '{print $1}' && for i in `chroot_cmd find /etc/systemd/system -name \*.service | grep wants`; do basename $i | awk -F'.service' '{print $1}'; done) | sort
+    fi
+  }
+
+  print_status(){
+    # only makes sense on a running system
+    if [ $RUNNING -eq 0 ]; then
+      systemctl -t service --full --no-legend status $1.service
+    fi
+  }
+
+  stop_service(){
+    # only makes sense on a running system
+    if [ $RUNNING -eq 0 ]; then
+      systemctl stop $1.service
+    fi
+  }
+
+  enable_service(){
+    # on running systems we can just enable the service
+    # for chroot filesystems we need to use systemd-nspawn
+    #  this really only works for enable/disbale, no other commands
+    if [ -n "$VERBOSE" ]; then
+      if [ $RUNNING -eq 0 ]; then
+        systemctl enable $1.service 2>&1 | grep ln
+      else
+        systemd-nspawn -D $ROOT systemctl enable $1.service 2>&1 | grep ln
+      fi
+    else
+      if [ $RUNNING -eq 0 ]; then
+        systemctl enable $1.service &>/dev/null
+      else
+        systemd-nspawn -D $ROOT systemctl enable $1.service &>/dev/null
+      fi
+    fi
+  }
+
+  disable_service(){
+    # on running systems we can just disable the service
+    # for chroot filesystems we need to use systemd-nspawn
+    #  this really only works for enable/disbale, no other commands
+    if [ -n "$VERBOSE" ]; then
+      if [ $RUNNING -eq 0 ]; then
+        systemctl disable $1.service 2>&1 | grep rm
+      else
+        systemd-nspawn -D $ROOT systemctl disable $1.service 2>&1 | grep rm
+      fi
+    else
+      if [ $RUNNING -eq 0 ]; then
+        systemctl disable $1.service &>/dev/null
+      else
+        systemd-nspawn -D $ROOT systemctl disable $1.service &>/dev/null
+      fi
+    fi
+  }
+
+  service_exists(){
+    # /usr/lib/systemd/system are where the *.service scripts for the service live
+    chroot_cmd find /usr/lib/systemd/system -type f | grep -q $1.service
+  }
+
+  turn_on_services(){
+    # systemctl can take a list of services and do the right thing, but we need to append .service back to the names
+    systemctl start `echo $@ | sed 's/\(\S\) /\1.service /g' | sed 's/\(\S\)$/\1.service/g'`
+  }
+else
+  list_on_services(){
+    # the perl foo at the end should be changed to something lighter weight
+    # this is trying to keep most of the old logic in place for now
+    chroot_cmd chkconfig --list 2>&1 | grep -E "[1-5]:on|[[:space:]]on" | perl -ne '/^\s*([^:\s]+)[:\s]/ && print "$1 "'
+  }
+
+  print_status(){
+    if [ $RUNNING -eq 0 ]; then
+      chroot_cmd service $1 status
+    fi
+  }
+
+  stop_service(){
+    if [ $RUNNING -eq 0 ]; then
+      chroot_cmd service $1 stop
+    fi
+  }
+
+  enable_service(){
+    # we want to completely remove and add a service before enabling to make sure the chkconfig headers haven't changed
+    chroot_cmd chkconfig --del $1
+    chroot_cmd chkconfig --add $1
+    chroot_cmd chkconfig $1 on
+  }
+
+  disable_service(){
+    chroot_cmd chkconfig --level 0123456 $1 off
+  }
+
+  service_exists(){
+    # look in both paths for the service since it might be a xinted service
+    chroot_cmd find /etc/rc.d/init.d /etc/xinetd.d | grep -q $1
+  }
+
+  turn_on_services(){
+    # this is all the "old" logic packed into a function
+    runlevel=$(runlevel | awk '{print $2}')
+    # if services need to be turned on (on a running system) then they should be started in the correct order
+    for i in $onservices; do
+      test ! \( -f /etc/rc${runlevel}.d/S*$i -o -f /etc/xinetd.d/$i \) && \
+        echo "ppsst[$IMG]: WARNING: could not start $i because it is not chkconfig'd on at runlevel $runlevel"
+    done 
+
+    ordered_onservices="$((for i in $@; do ls /etc/rc${runlevel}.d/S*$i 2>&-; done) | sort)"
+  
+    for s in $ordered_onservices; do
+      i=$(echo $s | perl -ne '/S\d\d(.*)$/ && print $1')
+      status=$(service $i status)
+      result=$?
+      # FIXME: what about dead but subsys locked?
+  
+      if [ -n "$DEBUG" ]; then
+        echo $status
+        echo result=$result
+      fi
+  
+      # some services don't support a status argument
+      echo $status | grep -q 'Usage'; no_status=$?
+  
+      # start if status returns error
+      if [ $result != "0" ] && [ $no_status == 1 ]; then
+        if [ -z "$DRYRUN" ]; then
+          start=$(service $i start)
+  
+          # some services don't prefix their stdout with the service name
+          echo $start | grep -q "$i"; no_prefix=$?
+          [ $no_prefix == 1 ] && echo -n "ppsst[$IMG]: starting $i: "
+          echo $start
+  
+          touch $CFGDIR/.createimg
+        else
+          echo "ppsst[$IMG]: ${DRYRUN_PREFIX}starting $i"
+        fi
+      fi
+    done
+  }
+fi
+
+if [ -z "$ROOT" ]; then
+  echo This script must have variables and functions defined as in the PPSST build script.
+else
+  onservices=$(egrep -v '^#|^[[:space:]]*$' $ONSVC)
+
+  # this loop will disable any enabled service thats not specifically requested
+  for i in $(list_on_services); do
+    # if the service thats requested to be on is already on, skip to next
+    echo $onservices | grep -q $i && continue
+
+    # unnecessary for images since they are not running
+    # only bother to stop service if it is running
+    if [ $RUNNING -eq 0 ]; then
+      if [ -n "$VERBOSE" ]; then
+        print_status $i
+      else
+        print_status $i &> /dev/null
+      fi
+
+      if [ $? -eq 0 ]; then
+        echo "ppsst[$IMG]: ${DRYRUN_PREFIX}stopping $i"
+        if [ -z "$DRYRUN" ]; then
+          stop_service $i
+        fi
+      fi
+    fi
+    
+    echo "ppsst[$IMG]: ${DRYRUN_PREFIX}disabling $i"
+    if [ -z "$DRYRUN" ]; then
+      disable_service $i
+      if [ $RUNNING -eq 1 ]; then
+        touch $CFGDIR/.createimg
+      fi
+    fi
+  done
+
+  # chkconfig on "gold" services from "onservices"
+  # You have to be careful about using chkconfig with services managed
+  # by xinetd because chkconfig whatever on/off changes the timestamp of the
+  # xinetd.d file EVEN WHEN THE SERVICE STATE DIDN'T CHANGE.  This causes *lots*
+  # of restarts of the xinetd daemon.
+  [ -n "$DEBUG" ] && echo "ppsst[$IMG]: ${DRYRUN_PREFIX}ensuring the following services are on: $onservices"
+
+  for i in $onservices; do
+    # does it exist?
+    service_exists $i
+    if [ $? -eq 0 ]; then
+      # is it NOT already enabled?
+      list_on_services | grep -q $i
+      if [ $? -eq 1 ]; then
+        echo "ppsst[$IMG]: ${DRYRUN_PREFIX}enabling $i"
+        if [ -z "$DRYRUN" ]; then
+          enable_service $i
+          # for images, we need to touch the image creation trigger
+          if [ $RUNNING -eq 1 ]; then
+            touch $CFGDIR/.createimg
+          fi
+        fi
+      else # already enabled 
+        # remove service from to-be-enabled-list
+        onservices=$(echo $onservices | sed "s/$i //g" | sed "s/$i$//g")
+      fi
+    else # doesn't exist
+      echo "ppsst[$IMG]: WARNING: could not enable $i because it is not installed"
+      # remove service from to-be-enabled-list
+      onservices=$(echo $onservices | sed "s/$i/ /g" | sed "s/$i$//g")
+    fi
+  done
+
+  # if we are a running system, and there are services to be turned on, do it
+  if [ $RUNNING -eq 0 ] && [ -n "$onservices" ] && [[ $onservices =~ [:graph:] ]]; then
+    echo "ppsst[$IMG]: ${DRYRUN_PREFIX}starting $onservices"
+    if [ -z "$DRYRUN" ]; then
+      turn_on_services $onservices
+    fi
+  fi
+fi

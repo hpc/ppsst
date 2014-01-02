@@ -1,0 +1,59 @@
+#!/bin/bash
+
+PARALLELISM=4 # Default, expected to be overidden
+
+[ -f /etc/sysconfig/ppsst ] && . /etc/sysconfig/ppsst
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:$PPSST_BIN
+
+[ -z "$CFGDIR" ] && CFGDIR=$(dirname $0)
+
+while getopts ":c:hnrv" opt; do
+  case $opt in
+    c)
+      CFGDIR=$OPTARG
+      ;;
+    h)
+      echo "$0 [OPTION]      synchronize a Linux image to service nodes used in hierarchical booting scheme" >&2
+      echo >&2
+      echo "    [-c CFGDIR]  image in CFGDIR" >&2
+      echo >&2
+      echo "If '-c CFGDIR' is not used, then it is assumed" >&2
+      echo "that CFGDIR=$(dirname $0)" >&2
+      echo >&2
+      echo "    [-n]         dry run (no changes are made)" >&2
+      echo >&2
+      echo "    [-v]         verbose" >&2
+      echo >&2
+      exit -1
+      ;;
+    n)
+      export DRYRUN=true
+      ;;
+    v)
+      export VERBOSE=true
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      exit -1
+      ;;
+  esac
+done
+
+[ -z "$IMG" ] && IMG=$(basename $CFGDIR)
+
+# support for hierarchical booting via service nodes
+# vnfs area is rsynced to all service node's /vnfs dir
+if test -x /usr/bin/pexec; then
+   [ -e /etc/netgroup ] && NG=$(grep "^service" /etc/netgroup)
+
+   rsync_opts="-aSHO --delete"
+   [ -n "$DRYRUN" ] && rsync_opts="-naSHO --delete"
+
+   if [ "$IMG" != "service" -a -n "$NG" -a -z "$DRYRUN" ]; then
+      [ -n "$VERBOSE" ] && echo "${DRYRUN_PREFIX}syncing new image with service nodes"
+      /usr/bin/pexec -t 600 -vP $PARALLELISM -m @service --ping \
+	 --rsync --rsync-opts "$rsync_opts" \
+	 $CFGDIR %host%:/vnfs/.
+   fi
+fi

@@ -1,0 +1,166 @@
+.TH ppsst 1  "December 12, 2011" "version 0.7" "USER COMMANDS"
+.SH NAME
+ppsst \- Prerequisites, Packages, Services, and Sanity check Tools
+.SH SYNOPSIS
+.B ppsst
+.SH DESCRIPTION
+A set of tools used to install/remove groups of packages, enable/disable services, 
+and check for uncontrolled files in a diskless image or on a running host.
+It also ensures that certain prerequisites are satisfied (certain directories 
+and files are present and specific packages are installed).
+.PP
+ppsst uses config files that are simple lists of RPMS, 
+.BR yum (1)
+groups of RPMS, and services. The files may contain comments beginning 
+with a #-sign, and the package names can include globs.
+
+Note: The installpackages and removepackages files are also used by the 
+.BR customrepos (1)
+tool. ppsst treats the lists as RPM names, while customrepos treats the 
+lists as RPM filenames. For the most part, this shouldn't matter, but it 
+does mean there are some subtle differences in globbing behavior.
+
+For a running host being controlled with ppsst, config files are in 
+.I /opt/ppsst/etc/
+\. Diskless images have their config files in some other directory, and it is 
+assumed that the image is built in a 
+.I rootfs 
+dir at the same level.
+
+.I excludepackages
+- corresponds to yum excludes. These are packages to be 
+excluded from installation (not removed if already installed). Allows globbing.
+
+.I installgroups
+- yum groups to be installed
+
+.I installpackages
+- RPM package names. May include version numbers and/or globs.
+
+.I onservices
+- list of all SysV init.d and xinetd services that should be on in 
+the default runlevel. If executed on a running system, then the services will be 
+started in the
+.BR chkconfig (1)
+order.
+
+.I removegroups
+- yum groups to be removed
+
+.I removepackages
+- RPM package names. May include version numbers and/or globs.
+
+.SH BUILD SCRIPT DESCRIPTION
+.PP
+The primary ppsst command is 
+.I build
+and it made of phases implemented by independent scripts
+
+.I prereqs
+- populates a diskles image's rootfs directory with the bare minimum directories, 
+files, special files, and packages necessary to use yum to install the rest.
+
+.I packages
+-  uses yum to remove and install packages and groups. It temporarily  mounts /proc in a diskless 
+rootfs so that certain commands execute without complaint.
+
+.I services
+- chkconfigs off all services not listed in the onservices config file. Otherwise, 
+the service is chkconfiged on. And if it is a running host, the services are started 
+in the order specified by chkconfig for the default runlevel.
+
+.I createimg
+- if run for a diskless image, this will create a hybridized RAM root image that--
+after being booted, will mount the rest of the image over NFS. Whitelisted files 
+are in the RAM root, and other files are symlinks into NFS space. See 
+.BR perceus-hybrdize (1)
+
+.I hierarchical_sync
+- if run for a diskless image, and the cluster uses a hierarchy of service nodes 
+(defined in /etc/netgroup) to boot the cluster, then this will synchronize the 
+built image and RAM root out to the service nodes
+
+.SH BUILD SCRIPT OPTIONS
+.TP
+\-c CFGDIR
+build image in CFGDIR directory.  If '-c CFGDIR' is not used, then it is assumed
+that CFGDIR is the directory containing the build script.  
+
+CFGDIR contains the configuration files mentioned above, and in the case of 
+diskless images, the yum.conf file. A running host uses /etc/yum.conf
+
+.TP
+\-d
+debug
+
+.TP
+\-f
+force diskless image to be created
+
+.TP
+\-n
+dry run (no changes are made)
+
+.TP
+\-r
+act on a running Linux installation, rather than a diskless image
+remember, if you don't specify -c CFGDIR, then /opt/ppsst/etc is assumed
+NOTE: regardless of -c CFGDIR, YUMCFG=/etc/yum.conf
+
+.TP
+\-s
+synchronize diskless images to service nodes in a hierarchical boot environment.
+This requires a
+.I service
+group defined in 
+.I /etc/netgroup
+
+.TP
+\-v
+verbose
+
+
+.SH OTHER SCRIPT DESCRIPTIONS
+
+.I sanity
+A tool, mostly intended for diskless images, to look for uncontrolled files.
+It runs an RPM verify and looks for files that have been modified from what 
+is in the RPM database. It then removes any files in that list that are under 
+cfengine control. The remaining files listed have been modified in an ad hoc 
+fashion.
+
+The tool also lists all files in the image rootfs and subtracts any that are 
+controlled by RPM or cfengine. These files may have been auto-generated, but 
+are also technically outside of configuration management control.
+
+The following scripts are simply helper scripts used by other ppsst scripts:
+.I chroot_cmd
+.I rpm_cmd
+.I yum_cmd
+
+.PP
+.SH OPTIONS (environment variables)
+All of these scripts refer to variables set in 
+.I /etc/sysconfig/ppsst
+.TP
+.B PPSST_BIN (required)
+location of build and associated helper scripts
+.TP
+.B PPSST_ETC (required)
+location of installpackages, removepackages, etc. for the running host
+diskless image config files are located elsewhere
+.TP
+.B PARALLELISM (required)
+pexec parallelism used in hierarchical_sync script
+
+.SH EXIT STATUS
+ppsst exists with 0 for success, -1 for an invalid option, and 1 for other errors.
+.SH AUTHOR
+Andrew Shewmaker (shewa (at) lanl.gov)
+.SH SEE ALSO
+.BR chkconfig (1)
+.BR customrepos (1)
+.BR perceus-hybridize (1)
+.BR rpm (1)
+.BR service (1)
+.BR yum (1)

@@ -1,0 +1,206 @@
+#!/bin/bash
+
+[ -f /etc/sysconfig/ppsst ] && . /etc/sysconfig/ppsst
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:$PPSST_BIN
+
+export CFGDIR=$(dirname $0)
+export YUMCFG=$CFGDIR/yum.conf
+export ROOT=$CFGDIR/rootfs
+export IMG=$(basename $CFGDIR)
+export RAMROOT=$CFGDIR/vnfs.img
+export RUNNING=1 # 0 is true and 1 is false
+export FORCE=1   # 0 is true and 1 is false
+export XARGSCMD="xargs"
+export SYNC=1    # 0 is true and 1 is false
+
+# if not using the cfgdir command line option (-c), then the
+# build script must be called with full path, not relative, 
+# for the script to determine which image we are working on
+
+while getopts ":c:dfhnrvs" opt; do
+  case $opt in
+    c)
+      export CFGDIR=$OPTARG
+      if [ $RUNNING -eq 1 ]; then # if this is not a running host
+        export YUMCFG=$CFGDIR/yum.conf
+        export ROOT=$CFGDIR/rootfs
+        export IMG=$(basename $CFGDIR)
+        export RAMROOT=$CFGDIR/vnfs.img
+      fi
+      ;;
+    d)
+      export DEBUG=true
+      export YUMDEBUG="-d 2"
+      set -x
+      ;;
+    f)
+      export FORCE=0
+      ;;
+    h)
+      echo "$0 [OPTION]      build a Linux image in an alternate root directory" >&2
+      echo >&2
+      echo "    [-c CFGDIR]  build image in CFGDIR" >&2
+      echo >&2
+      echo "If '-c CFGDIR' is not used, then it is assumed" >&2
+      echo "that CFGDIR=$(dirname $0)" >&2
+      echo >&2
+      echo "CFGDIR contains these configuration files:" >&2
+      echo "    excludepackages   - file listing packages (one per line) excluded from install/updated, but not removed" >&2
+      echo "    * installgroups   - file listing yum groups to be installed/updated" >&2
+      echo "    * installpackages - file listing packages to be installed/updated" >&2
+      echo "    * removegroups    - file listing yum groups to be removed" >&2
+      echo "    * removepackages  - file listing packages to be removed" >&2
+      echo "    * onservices      - file listing services to be turned on (all others are turned off!)" >&2
+      echo "    * yum.conf        - standard yum configuration file" >&2
+      echo >&2
+      echo "    * required" >&2
+      echo "    NOTE: globs are allowed in all files except onservices" >&2
+      echo >&2
+      echo "    [-d]         debug" >&2
+      echo >&2
+      echo "    [-f]         force diskless image to be created" >&2
+      echo >&2
+      echo "    [-n]         dry run (no changes are made)" >&2
+      echo >&2
+      echo "    [-r]         act on a running Linux installation, rather than a diskless image" >&2
+      echo "                 remember, if you don't specify -c CFGDIR, then CFGDIR=$(dirname $0) is assumed" >&2
+      echo "                 NOTE: regardless of -c CFGDIR, YUMCFG=/etc/yum.conf" >&2
+      echo >&2
+      echo "    [-s]         synchronize images to service nodes for hierarchical booting" >&2
+      echo >&2
+      echo "    [-v]         verbose" >&2
+      echo >&2
+      exit -1
+      ;;
+    n)
+      export DRYRUN=true
+      export DRYRUN_PREFIX="dryrun: " # string is used as prefix for verbose output
+      ;;
+    r)
+      export RUNNING=0 # 0 is true and 1 is false 
+      export YUMCFG="/etc/yum.conf"
+      export ROOT="/"
+      export IMG=$(hostname | awk -F. '{print $1}')
+      unset RAMROOT
+      ;;
+    s)
+      export SYNC=0
+      ;;
+    v)
+      export VERBOSE=true
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      exit -1
+      ;;
+  esac
+done
+
+umask 022
+
+export PROG=$(basename $0)
+export LOCKFILE=/var/lock/subsys/$PROG-$IMG
+
+if [ -f $LOCKFILE ] ; then
+  ps $(cat $LOCKFILE) &> /dev/null
+  if [ $? -eq 0 ]; then
+    echo "ppsst[$IMG]: $LOCKFILE indicates $PROG-$IMG is already running ... exiting"
+    exit
+  fi
+fi
+
+echo $$ > $LOCKFILE
+
+[ -n "$VERBOSE" ] && echo "ppsst[$IMG]: starting $PROG-$IMG"
+
+# set variables if the corresponding file exists
+if [ -e $CFGDIR/installgroups ] ; then
+    export INGRP="$CFGDIR/installgroups"
+fi
+if [ -e $CFGDIR/installpackages ] ; then
+    export INPKG="$CFGDIR/installpackages"
+fi
+if [ -e $CFGDIR/removegroups ] ; then
+    export RMGRP="$CFGDIR/removegroups"
+fi
+if [ -e $CFGDIR/removepackages ] ; then
+    export RMPKG="$CFGDIR/removepackages"
+fi
+if [ -e $CFGDIR/excludepackages ] ; then
+    export EXPKG="$CFGDIR/excludepackages"
+fi
+if [ -e $CFGDIR/onservices ] ; then
+    export ONSVC="$CFGDIR/onservices"
+fi
+
+if test    -z "$INGRP" \
+        -o -z "$INPKG" \
+        -o -z "$RMGRP" \
+        -o -z "$RMPKG" \
+        -o -z "$ONSVC"
+then
+    echo installgroups=$INGRP
+    echo installpackages=$INPKG
+    echo removegroups=$RMGRP
+    echo removepackages=$RMPKG
+    echo onservices=$ONSVC
+    echo not all required config files are present, exiting
+    rm -f $LOCKFILE
+    exit 0
+fi
+
+# set variables used to decide whether or not create a new ramroot image
+# NO_RAMROOT and FORCE
+# 0 is true
+# 1 is false
+export NO_RAMROOT=1
+if [ $RUNNING -eq 1 ] && [ ! -e $RAMROOT ]; then
+    NO_RAMROOT=0
+fi
+
+if [ $FORCE -ne 0 ]; then
+  test -e $CFGDIR/.createimg; FORCE=$?
+fi
+
+[ -n "$DEBUG" ] && echo "DRYRUN=$DRYRUN"
+[ -n "$DEBUG" ] && echo "FORCE=$FORCE"
+[ -n "$DEBUG" ] && echo "NO_RAMROOT=$NO_RAMROOT"
+
+if [ $NO_RAMROOT -eq 0 ] || [ $FORCE -eq 0 ] || [ $RUNNING -eq 0 ]
+then
+    # ensure prerequisite dirs, files, etc. are installed
+    . $PPSST_BIN/prereqs
+
+    # install/remove packages/groups
+    . $PPSST_BIN/packages
+
+    # add/remove services
+    . $PPSST_BIN/services
+
+    # update FORCE var in case a previous script touched the file
+    if [ $FORCE -ne 0 ]; then
+      test -e $CFGDIR/.createimg; FORCE=$?
+    fi
+
+    # create perceus image
+    if [ $RUNNING -eq 1 ] && [ $FORCE -eq 0 ]; then
+      if test -x $PPSST_BIN/createimg; then
+        . $PPSST_BIN/createimg
+      fi
+    fi
+
+    # hierarchical booting synchronization
+    if [ $SYNC -eq 0 ]; then
+      if test -x $PPSST_BIN/hierarchical_sync; then
+        . $PPSST_BIN/hierarchical_sync
+      fi
+    fi
+fi
+
+rm -f $LOCKFILE
+
+if [ -n "$VERBOSE" ]; then
+   echo "ppsst[$IMG]: finished $PROG-$IMG"
+   echo 'ppsst:'
+fi

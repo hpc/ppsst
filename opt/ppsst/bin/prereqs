@@ -1,0 +1,61 @@
+#!/bin/bash
+
+[ -f /etc/sysconfig/ppsst ] && . /etc/sysconfig/ppsst
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:$PPSST_BIN
+
+if [ -z "$ROOT" ]; then
+  echo This script must have variables and functions defined as in the PPSST build script.
+else
+  # make sure these dirs and files always exist, so that rpm/yum can run
+  # and so that certain rpms don't complain
+  
+  # Prerequisite directories
+  for i in \
+      $ROOT/dev \
+      $ROOT/etc/ntp \
+      $ROOT/etc/sysconfig \
+      $ROOT/var/empty/sshd \
+      $ROOT/var/lib/rpm \
+      $ROOT/var/lib/yum \
+      $ROOT/var/lock/rpm \
+      $ROOT/var/log
+  do
+      [ -n "$VERBOSE" ] && (test -d $i || echo "ppsst[$IMG]: creating prerequisite directory $i")
+      test -d $i || ( mkdir -p $i; touch $CFGDIR/.createimg )
+  done
+  
+  # Prerequisite files
+  for i in \
+      $ROOT/var/log/yum.log
+  do
+      [ -n "$VERBOSE" ] && (test -f $i || echo "ppsst[$IMG]: creating prerequisite normal file $i")
+      test -f $i || ( touch $i; touch $CFGDIR/.createimg )
+  done
+  
+  # Prerequisite special files
+  [ -n "$VERBOSE" ] && (test -c $ROOT/dev/null    || echo "ppsst[$IMG]: creating prerequisite /dev/null")
+  test -c $ROOT/dev/null    || (rm -f $ROOT/dev/null; mknod -m 0666 $ROOT/dev/null    c 1 3; touch $CFGDIR/.createimg)
+  [ -n "$VERBOSE" ] && (test -c $ROOT/dev/urandom || echo "ppsst[$IMG]: creating prerequisite /dev/urandom")
+  test -c $ROOT/dev/urandom || (rm -f $ROOT/dev/urandom; mknod -m 0666 $ROOT/dev/urandom c 1 9; touch $CFGDIR/.createimg)
+  
+  # This initializes the RPM db if it hasn't been already
+  [ -n "$VERBOSE" ] && (test -f $ROOT/var/lib/rpm/Packages || echo "ppsst[$IMG]: initializing RPM db")
+  test -f $ROOT/var/lib/rpm/Packages || ( rpm --root $ROOT --initdb; touch $CFGDIR/.createimg )
+  
+  # Prerequisite packages - not trusting the distro/yum
+  # RHEL and SuSE are both known to have coreutils and filesystem packages that 
+  # provide utilities that might be used in postinstall scripts
+  for i in \
+      coreutils \
+      chkconfig \
+      filesystem \
+      systemd
+  do
+      yum_cmd list $i &>/dev/null
+      if [ $? -eq 0 ]; then
+        [ -n "$VERBOSE" ] && (rpm --root $ROOT --quiet -q $i || echo "ppsst[$IMG]: installing prerequisite package $i")
+        rpm --root $ROOT --quiet -q $i || yum_cmd install $i
+      fi
+  done
+fi
