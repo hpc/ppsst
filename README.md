@@ -8,14 +8,22 @@ This utility is used to install packages and configure services on either a runn
 Usage
 -----
 example of a dry run for a running host:
+```
 /opt/ppsst/bin/build -c /opt/ppsst/etc -r -n
+```
 example of provisioning a running host:
+```
 /opt/ppsst/bin/build -c /opt/ppsst/etc -r -v
+```
 
 example of a dry run on a root-file-system:
+```
 /opt/ppsst/bin/build -v -d -n -c /path/to/nodeimage
+```
 example of provisioning a root-file-system:
+```
 /opt/ppsst/bin/build -v -c /path/to/nodeimage
+```
 
 Configuration Definitions
 -------------------------
