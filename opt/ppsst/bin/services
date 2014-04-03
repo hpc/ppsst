@@ -213,7 +213,7 @@ else
     service_exists $i
     if [ $? -eq 0 ]; then
       # is it NOT already enabled?
-      list_on_services | grep -e [[:space:]]$i[[:space:]] -e ^$i[[:space:]] -e [[:space:]]$i$
+      list_on_services | grep -q -e [[:space:]]$i[[:space:]] -e ^$i[[:space:]] -e [[:space:]]$i$
       if [ $? -eq 1 ]; then
         echo "ppsst[$IMG]: ${DRYRUN_PREFIX}enabling $i"
         if [ -z "$DRYRUN" ]; then
